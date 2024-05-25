@@ -1,0 +1,49 @@
+stages:
+  - build
+  - deploy
+
+build:
+  stage: build
+  image: docker:20.10.16
+  variables:
+    DOCKER_DRIVER: overlay2
+    DOCKER_HOST: tcp://docker:2375
+    DOCKER_TLS_CERTDIR: ""
+  services:
+    - docker:20.10.16-dind
+  before_script:
+    - docker login -u $CI_REGISTRY_USER 
+                              -p $CI_REGISTRY_PASSWORD $CI_REGISTRY
+  script:
+    - docker pull $CI_REGISTRY_IMAGE:latest || true
+    - docker build --cache-from $CI_REGISTRY_IMAGE:latest 
+        --tag $CI_REGISTRY_IMAGE:$CI_COMMIT_SHA 
+        --tag $CI_REGISTRY_IMAGE:latest .
+    - docker push $CI_REGISTRY_IMAGE:$CI_COMMIT_SHA
+    - docker push $CI_REGISTRY_IMAGE:latest
+
+deploy:
+  stage: deploy
+  image: alpine
+  before_script:
+    # Install dependencies
+    - apk add gettext openssh-client
+  script:
+    # Create the docker-compose.yml with the path to the GitLab registry
+    - envsubst < docker-compose.tmpl > docker-compose.yml
+    # Start SSH agent and import private key
+    - eval `ssh-agent`
+    - ssh-add <(echo "$SSH_PRIVATE_KEY")
+    # Add the deployment server to list of known hosts
+    - mkdir -p ~/.ssh
+    - chmod 700 ~/.ssh
+    - touch ~/.ssh/known_hosts
+    - chmod 600 ~/.ssh/known_hosts
+    - echo $SSH_HOST_KEY >> ~/.ssh/known_hosts
+    # Upload the docker-compose.yml file to the deployment server
+    - scp docker-compose.yml gitlab-deploy@192.168.70.11:/opt/loki
+    # Login to container registry and start the docker compose stack
+    - ssh gitlab-deploy@192.168.70.11 "cd /opt/loki; 
+        docker login -u $CI_REGISTRY_USER 
+          -p $CI_REGISTRY_PASSWORD $CI_REGISTRY;
+        docker compose up -d"
